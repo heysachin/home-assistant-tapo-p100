@@ -19,7 +19,11 @@ from custom_components.tapo.const import (
 )
 from custom_components.tapo.coordinators import HassTapoDeviceData, TapoDataCoordinator
 from custom_components.tapo.hub.hass_tapo_hub import HassTapoHub, TapoHub
-from custom_components.tapo.setup_helpers import create_aiohttp_session
+from custom_components.tapo.setup_helpers import (
+    async_connect as connect,
+    async_connect_discovered_device as connect_discovered_device,
+    create_aiohttp_session,
+)
 
 _LOGGER = logging.getLogger(__name__)
 

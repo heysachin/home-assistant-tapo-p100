@@ -13,8 +13,8 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.service_info.dhcp import DhcpServiceInfo
 from homeassistant.helpers.typing import DiscoveryInfoType
 from plugp100.common.credentials import AuthCredential
-from plugp100.devices import DeviceConnectConfiguration, TapoDevice, connect
-from plugp100.discovery import DiscoveredDevice, connect_discovered_device
+from plugp100.devices import DeviceConnectConfiguration, TapoDevice
+from plugp100.discovery import DiscoveredDevice
 from plugp100.errors import InvalidAuthentication, TapoError, TapoException
 import voluptuous as vol
 
@@ -33,7 +33,12 @@ from custom_components.tapo.const import (
 )
 from custom_components.tapo.discovery import discover_tapo_device
 from custom_components.tapo.errors import CannotConnect, InvalidAuth, InvalidHost
-from custom_components.tapo.setup_helpers import create_aiohttp_session, get_host_port
+from custom_components.tapo.setup_helpers import (
+    async_connect as connect,
+    async_connect_discovered_device as connect_discovered_device,
+    create_aiohttp_session,
+    get_host_port,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -308,17 +313,22 @@ class TapoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         try:
             session = create_aiohttp_session(self.hass)
             credential = AuthCredential(config[CONF_USERNAME], config[CONF_PASSWORD])
-            if discovered_device is None:
-                host, port = get_host_port(config[CONF_HOST])
-                config = DeviceConnectConfiguration(
-                    credentials=credential,
-                    host=host,
-                    port=port,
-                )
-                device = await connect(config=config, session=session)
-            else:
+            host, port = get_host_port(config[CONF_HOST])
+            connect_config = DeviceConnectConfiguration(
+                credentials=credential,
+                host=host,
+                port=port,
+            )
+            if discovered_device is not None:
                 device = await connect_discovered_device(
-                    discovered_device, credential, session
+                    discovered_device=discovered_device,
+                    credentials=connect_config.credentials,
+                    session=session,
+                )
+            else:
+                device = await connect(
+                    config=connect_config,
+                    session=session,
                 )
             await device.update()
             return device
@@ -358,6 +368,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 def is_supported_device(discovered_device: DiscoveredDevice) -> bool:
     model = discovered_device.device_model.lower()
     kind = discovered_device.device_type.upper()
+    if model.startswith("h200"):
+        return True
     if kind == "SMART.IPCAMERA" or "CAMERA" in kind:
         _LOGGER.info("Found device model: %s, but type not supported %s", model, kind)
         return False
