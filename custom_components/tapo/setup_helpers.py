@@ -59,6 +59,18 @@ async def async_connect(
     session: ClientSession,
 ) -> TapoDevice:
     """Connect to a Tapo device with transparent fallback to CameraHubProtocol on port 443 for H200 hubs."""
+    if config.port == 443:
+        try:
+            return await _create_h200_hub(config.host, 443, config.credentials, session)
+        except Exception as hub_err:
+            _LOGGER.error(
+                "CameraHubProtocol on %s:443 failed: %s",
+                config.host,
+                hub_err,
+                exc_info=True,
+            )
+            raise hub_err
+
     original_error = None
     try:
         return await plugp100_connect(config=config, session=session)
@@ -79,10 +91,17 @@ async def async_connect(
     try:
         return await _create_h200_hub(config.host, 443, config.credentials, session)
     except Exception as hub_err:
-        _LOGGER.debug("CameraHubProtocol attempt on %s failed: %s", config.host, hub_err)
+        _LOGGER.error(
+            "CameraHubProtocol attempt on %s:443 failed: %s",
+            config.host,
+            hub_err,
+            exc_info=True,
+        )
+        if isinstance(hub_err, InvalidAuthentication):
+            raise hub_err
         if original_error is not None:
             raise original_error from hub_err
-        raise
+        raise hub_err
 
 
 async def async_connect_discovered_device(

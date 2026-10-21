@@ -356,6 +356,38 @@ class CameraHubProtocol(TapoProtocol):
 
         raise Exception("Failed to execute H200 command after session renewal")
 
+    async def _execute_command(self, method: str, params: Any = None) -> dict[str, Any]:
+        """Execute command, automatically wrapping in multipleRequest as required by modern Tapo camera firmware."""
+        req_item: dict[str, Any] = {"method": method}
+        if params is not None:
+            req_item["params"] = params
+
+        # Try multipleRequest first (standard for H200 / modern camera platform)
+        try:
+            resp = await self._execute_raw("multipleRequest", {"requests": [req_item]})
+            responses = []
+            if isinstance(resp, dict):
+                if "responses" in resp:
+                    responses = resp["responses"]
+                elif "result" in resp and "responses" in resp["result"]:
+                    responses = resp["result"]["responses"]
+
+            if responses and len(responses) > 0:
+                first = responses[0]
+                if isinstance(first, dict):
+                    if "result" in first:
+                        return first["result"]
+                    return first
+        except Exception as e:
+            _LOGGER.debug(
+                "multipleRequest for %s failed (%s), falling back to direct call",
+                method,
+                e,
+            )
+
+        # Fallback to direct method call
+        return await self._execute_raw(method, params)
+
     async def send_request(
         self, request: TapoRequest, retry: int = 3
     ) -> Try[TapoResponse[dict[str, Any]]]:
@@ -383,30 +415,35 @@ class CameraHubProtocol(TapoProtocol):
 
         # 2. Hub device info
         if method == "get_device_info":
-            info_res = await self._execute_raw(
+            info_res = await self._execute_command(
                 "getDeviceInfo", {"device_info": {"name": ["basic_info"]}}
             )
             basic_info = (
                 info_res.get("device_info", {}).get("basic_info", {})
                 if "device_info" in info_res
-                else info_res.get("basic_info", {})
+                else info_res.get("basic_info", info_res)
             )
             self._hub_info_cache = basic_info
 
             device_id = basic_info.get("device_id") or basic_info.get("mac", "")
             mac = basic_info.get("mac", "").replace(":", "-").upper()
-            nickname = basic_info.get("device_alias") or "Tapo Hub H200"
-            b64_nickname = base64.b64encode(nickname.encode("utf-8")).decode("utf-8")
+            nickname = (
+                basic_info.get("device_alias")
+                or basic_info.get("alias")
+                or basic_info.get("name")
+                or "Tapo Hub H200"
+            )
+            b64_nickname = self._ensure_b64(nickname)
 
             return {
                 "device_id": device_id,
                 "hw_id": basic_info.get("hw_id", ""),
                 "oem_id": basic_info.get("oem_id", ""),
-                "fw_ver": basic_info.get("sw_ver", "1.0.0"),
+                "fw_ver": basic_info.get("sw_ver") or basic_info.get("fw_ver") or "1.0.0",
                 "hw_ver": basic_info.get("hw_ver", "1.0"),
                 "mac": mac,
                 "nickname": b64_nickname,
-                "model": basic_info.get("device_model", "H200"),
+                "model": basic_info.get("device_model") or basic_info.get("model") or "H200",
                 "type": "SMART.TAPOHUB",
                 "overheated": False,
                 "ip": self.host,
@@ -418,7 +455,7 @@ class CameraHubProtocol(TapoProtocol):
         # 3. Child device list
         if method == "get_child_device_list":
             start_index = getattr(params, "start_index", 0) if params else 0
-            child_res = await self._execute_raw(
+            child_res = await self._execute_command(
                 "getChildDeviceList", {"childControl": {"start_index": start_index}}
             )
 
@@ -492,40 +529,21 @@ class CameraHubProtocol(TapoProtocol):
             req_data = getattr(params, "requestData", None)
             inner_dict = self._serialize_tapo_request(req_data)
 
-            # Send multipleRequest wrapping controlChild
-            hub_resp = await self._execute_raw(
-                "multipleRequest",
+            child_res = await self._execute_command(
+                "controlChild",
                 {
-                    "requests": [
-                        {
-                            "method": "controlChild",
-                            "params": {
-                                "childControl": {
-                                    "device_id": device_id,
-                                    "request_data": inner_dict,
-                                }
-                            },
-                        }
-                    ]
+                    "childControl": {
+                        "device_id": device_id,
+                        "request_data": inner_dict,
+                    }
                 },
             )
 
-            child_output = {}
-            if "responses" in hub_resp:
-                for resp in hub_resp["responses"]:
-                    if resp.get("method") == "controlChild" and "result" in resp:
-                        res = resp["result"]
-                        child_output = res.get("responseData", {}).get("result", res)
-                        break
-            elif "result" in hub_resp and "responses" in hub_resp["result"]:
-                for resp in hub_resp["result"]["responses"]:
-                    if resp.get("method") == "controlChild" and "result" in resp:
-                        res = resp["result"]
-                        child_output = res.get("responseData", {}).get("result", res)
-                        break
-            else:
-                child_output = hub_resp
-
+            child_output = (
+                child_res.get("responseData", {}).get("result", child_res.get("result", child_res))
+                if isinstance(child_res, dict)
+                else child_res
+            )
             return {"responseData": {"result": {"responses": [child_output]}}}
 
         # 5. Alarm controls
@@ -533,7 +551,7 @@ class CameraHubProtocol(TapoProtocol):
             alarm_duration = getattr(params, "alarm_duration", 30) if params else 30
             alarm_type = getattr(params, "alarm_type", "normal") if params else "normal"
             alarm_volume = getattr(params, "alarm_volume", "high") if params else "high"
-            return await self._execute_raw(
+            return await self._execute_command(
                 "play_alarm",
                 {
                     "alarm_duration": int(alarm_duration),
@@ -543,14 +561,14 @@ class CameraHubProtocol(TapoProtocol):
             )
 
         if method == "stop_alarm":
-            return await self._execute_raw("stop_alarm")
+            return await self._execute_command("stop_alarm")
 
         if method == "get_support_alarm_type_list":
-            return await self._execute_raw("get_support_alarm_type_list")
+            return await self._execute_command("get_support_alarm_type_list")
 
         # Fallback: pass-through execute
         serialized_params = self._serialize_tapo_request(params) if params else None
-        return await self._execute_raw(method, serialized_params)
+        return await self._execute_command(method, serialized_params)
 
     def _serialize_tapo_request(self, req: Any) -> Any:
         if req is None:

@@ -152,60 +152,70 @@ class MockH200HttpHandler:
             params = dec_req.get("params", {})
             self.requests_log.append((method, params))
 
-            # Simulate device responses
-            if method == "getDeviceInfo":
-                resp_payload = {
-                    "error_code": 0,
-                    "device_info": {
-                        "basic_info": {
-                            "device_id": "H200_DEVICE_12345",
-                            "mac": "A8-29-48-45-3A-2E",
-                            "hw_ver": "1.0",
-                            "sw_ver": "1.2.3 Build 240101",
-                            "device_model": "H200",
-                            "device_alias": "Living Room Hub",
-                            "in_alarm": False,
-                        }
-                    },
-                }
-            elif method == "getChildDeviceList":
-                resp_payload = {
-                    "error_code": 0,
-                    "childControl": {
-                        "child_device_list": [
-                            {
-                                "device_id": "CHILD_BUTTON_1",
-                                "model": "S200B",
-                                "hw_ver": "1.0",
-                                "fw_ver": "1.0.0",
-                                "alias": "My Smart Button",
-                                "status": 1,
-                                "mac": "00-11-22-33-44-55",
-                            }
-                        ],
-                        "sum": 1,
-                    },
-                }
-            elif method == "multipleRequest":
-                resp_payload = {
-                    "error_code": 0,
-                    "responses": [
-                        {
-                            "method": "controlChild",
-                            "result": {
-                                "responseData": {
-                                    "result": {
-                                        "logs": [{"id": 1, "event": "single_click"}]
-                                    }
+            def _handle_single_cmd(m, p):
+                if m == "getDeviceInfo":
+                    return {
+                        "method": "getDeviceInfo",
+                        "result": {
+                            "device_info": {
+                                "basic_info": {
+                                    "device_id": "H200_DEVICE_12345",
+                                    "mac": "A8-29-48-45-3A-2E",
+                                    "hw_ver": "1.0",
+                                    "sw_ver": "1.2.3 Build 240101",
+                                    "device_model": "H200",
+                                    "device_alias": "Living Room Hub",
+                                    "in_alarm": False,
                                 }
-                            },
-                        }
-                    ],
+                            }
+                        },
+                        "error_code": 0,
+                    }
+                elif m == "getChildDeviceList":
+                    return {
+                        "method": "getChildDeviceList",
+                        "result": {
+                            "childControl": {
+                                "child_device_list": [
+                                    {
+                                        "device_id": "CHILD_BUTTON_1",
+                                        "model": "S200B",
+                                        "hw_ver": "1.0",
+                                        "fw_ver": "1.0.0",
+                                        "alias": "My Smart Button",
+                                        "status": 1,
+                                        "mac": "00-11-22-33-44-55",
+                                    }
+                                ],
+                                "sum": 1,
+                            }
+                        },
+                        "error_code": 0,
+                    }
+                elif m == "controlChild":
+                    return {
+                        "method": "controlChild",
+                        "result": {
+                            "responseData": {
+                                "result": {
+                                    "logs": [{"id": 1, "event": "single_click"}]
+                                }
+                            }
+                        },
+                        "error_code": 0,
+                    }
+                elif m in ("play_alarm", "stop_alarm", "get_support_alarm_type_list"):
+                    return {"method": m, "result": {"success": True}, "error_code": 0}
+                return {"method": m, "result": {}, "error_code": 0}
+
+            if method == "multipleRequest":
+                inner_requests = params.get("requests", [])
+                resp_payload = {
+                    "error_code": 0,
+                    "responses": [_handle_single_cmd(req["method"], req.get("params")) for req in inner_requests],
                 }
-            elif method in ("play_alarm", "stop_alarm", "get_support_alarm_type_list"):
-                resp_payload = {"error_code": 0, "result": {"success": True}}
             else:
-                resp_payload = {"error_code": 0, "result": {}}
+                resp_payload = _handle_single_cmd(method, params)
 
             # Encrypt response
             raw_resp = json.dumps(resp_payload).encode("utf-8")
