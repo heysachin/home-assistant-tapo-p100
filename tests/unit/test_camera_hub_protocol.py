@@ -495,3 +495,57 @@ async def test_async_connect_manual_fallback_to_h200():
             result = await async_connect(config, session)
             assert result == mock_hub
             mock_create.assert_called_once_with("192.168.1.5", 443, config.credentials, session)
+
+
+@pytest.mark.asyncio
+async def test_camera_hub_protocol_control_child_device_info_and_button_update():
+    from plugp100.api.tapo_client import TapoClient
+    from plugp100.devices.children.trigger_button import TriggerButtonDevice
+    from plugp100.models.device import DeviceInfo
+
+    handler = MockH200HttpHandler(username="admin", password="password123")
+    mock_session = MockAiohttpSession(handler)
+
+    cred = AuthCredential("admin", "password123")
+    protocol = CameraHubProtocol(cred, "1.2.3.4", 443, http_session=mock_session)
+    await protocol.authenticate()
+
+    client = TapoClient(cred, "https://1.2.3.4:443", protocol=protocol)
+
+    # 1. First get child device list to prime cache
+    children_res = (await client.get_child_device_list()).get_or_raise()
+    children = children_res.get_children_base_info()
+    assert len(children) == 1
+    assert children[0].device_id == "CHILD_BUTTON_1"
+
+    # 2. Test control_child with component negotiation
+    nego_res = (await client.control_child("CHILD_BUTTON_1", TapoRequest.component_negotiation())).get_or_raise()
+    assert "component_list" in nego_res
+    comp_names = [c["id"] for c in nego_res["component_list"]]
+    assert "trigger_log" in comp_names
+    assert "battery_detect" in comp_names
+
+    # 3. Test control_child with get_device_info
+    info_res = (await client.control_child("CHILD_BUTTON_1", TapoRequest.get_device_info())).get_or_raise()
+    assert "device_id" in info_res
+    assert info_res["device_id"] == "CHILD_BUTTON_1"
+    assert info_res["model"] == "S200B"
+    # Verify DeviceInfo constructor works without KeyError
+    dev_info = DeviceInfo(**info_res)
+    assert dev_info.device_id == "CHILD_BUTTON_1"
+    assert dev_info.nickname == "My Smart Button"
+    assert dev_info.model == "S200B"
+
+    # 4. End-to-end child button device update
+    button = TriggerButtonDevice(
+        host="1.2.3.4",
+        port=443,
+        client=client,
+        child_id="CHILD_BUTTON_1",
+        parent_device_id="H200_DEVICE_12345",
+    )
+    await button.update()
+    assert button.device_id == "CHILD_BUTTON_1"
+    assert button.nickname == "My Smart Button"
+    assert button.battery_low is False
+    assert len(button.get_device_components) >= 2

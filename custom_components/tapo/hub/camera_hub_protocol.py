@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import ssl
+import time
 from typing import Any, Optional
 
 import aiohttp
@@ -74,6 +75,8 @@ class CameraHubProtocol(TapoProtocol):
         self._session: Optional[CameraHubSession] = None
         self._lock = asyncio.Lock()
         self._hub_info_cache: Optional[dict[str, Any]] = None
+        self._children_cache: dict[str, dict[str, Any]] = {}
+        self._children_cache_timestamp: float = 0.0
 
     @property
     def name(self) -> str:
@@ -400,6 +403,76 @@ class CameraHubProtocol(TapoProtocol):
                 _LOGGER.exception("CameraHubProtocol request %s failed: %s", request.method, e)
                 return Failure(e)
 
+    async def _refresh_children_cache(self) -> None:
+        """Fetch latest child devices from H200 and update internal cache."""
+        try:
+            child_res = await self._execute_command(
+                "getChildDeviceList", {"childControl": {"start_index": 0}}
+            )
+
+            raw_children = []
+            if "child_device_list" in child_res:
+                raw_children = child_res["child_device_list"]
+            elif "childControl" in child_res and "child_device_list" in child_res["childControl"]:
+                raw_children = child_res["childControl"]["child_device_list"]
+            elif "result" in child_res and "child_device_list" in child_res["result"]:
+                raw_children = child_res["result"]["child_device_list"]
+            elif (
+                "result" in child_res
+                and "childControl" in child_res["result"]
+                and "child_device_list" in child_res["result"]["childControl"]
+            ):
+                raw_children = child_res["result"]["childControl"]["child_device_list"]
+
+            parent_id = (
+                self._hub_info_cache.get("device_id") if self._hub_info_cache else "H200_HUB"
+            )
+
+            for item in raw_children:
+                child_id = item.get("device_id") or item.get("deviceId") or item.get("id")
+                if not child_id:
+                    continue
+                raw_nick = (
+                    item.get("alias")
+                    or item.get("nickname")
+                    or item.get("name")
+                    or item.get("model", "Child")
+                )
+                b64_nick = self._ensure_b64(raw_nick)
+
+                child_model = (
+                    item.get("model")
+                    or item.get("device_model")
+                    or item.get("sub_type")
+                    or "S200B"
+                )
+                child_mac = item.get("mac", "")
+
+                self._children_cache[child_id] = {
+                    "device_id": child_id,
+                    "hw_id": item.get("hw_id") or item.get("hardware_id") or "1.0",
+                    "oem_id": item.get("oem_id") or "1.0",
+                    "hw_ver": item.get("hw_ver") or item.get("hardware_version") or "1.0",
+                    "fw_ver": item.get("fw_ver") or item.get("software_version") or item.get("sw_ver") or "1.0.0",
+                    "type": item.get("type") or item.get("device_type") or "SMART.TAPOBUTTON",
+                    "model": child_model,
+                    "mac": child_mac,
+                    "nickname": b64_nick,
+                    "status": "online" if item.get("status") in (1, "online", True) else "offline",
+                    "parent_device_id": parent_id,
+                    "rssi": item.get("rssi", 0),
+                    "signal_level": item.get("signal_level", 0),
+                    "at_low_battery": item.get("at_low_battery", False),
+                    "battery_percentage": item.get("battery_percentage", -1),
+                    "lastOnboardingTimestamp": item.get("lastOnboardingTimestamp", 0),
+                    "report_interval": item.get("report_interval", 16),
+                }
+
+            self._children_cache_timestamp = time.monotonic()
+            _LOGGER.info("H200 refreshed %d child devices", len(self._children_cache))
+        except Exception as e:
+            _LOGGER.debug("Failed to refresh H200 children cache: %s", e)
+
     async def _handle_request(self, request: TapoRequest) -> dict[str, Any]:
         method = request.method
         params = request.params
@@ -455,96 +528,140 @@ class CameraHubProtocol(TapoProtocol):
         # 3. Child device list
         if method == "get_child_device_list":
             start_index = getattr(params, "start_index", 0) if params else 0
-            child_res = await self._execute_command(
-                "getChildDeviceList", {"childControl": {"start_index": start_index}}
-            )
-
-            raw_children = []
-            total_sum = 0
-            if "child_device_list" in child_res:
-                raw_children = child_res["child_device_list"]
-                total_sum = child_res.get("sum", len(raw_children))
-            elif "childControl" in child_res and "child_device_list" in child_res["childControl"]:
-                raw_children = child_res["childControl"]["child_device_list"]
-                total_sum = child_res["childControl"].get("sum", len(raw_children))
-            elif "result" in child_res and "child_device_list" in child_res["result"]:
-                raw_children = child_res["result"]["child_device_list"]
-                total_sum = child_res["result"].get("sum", len(raw_children))
-            elif "result" in child_res and "childControl" in child_res["result"] and "child_device_list" in child_res["result"]["childControl"]:
-                raw_children = child_res["result"]["childControl"]["child_device_list"]
-                total_sum = child_res["result"]["childControl"].get("sum", len(raw_children))
-
-            parent_id = (
-                self._hub_info_cache.get("device_id") if self._hub_info_cache else "H200_HUB"
-            )
-
-            adapted_children = []
-            for item in raw_children:
-                raw_nick = (
-                    item.get("alias")
-                    or item.get("nickname")
-                    or item.get("name")
-                    or item.get("model", "Child")
-                )
-                b64_nick = self._ensure_b64(raw_nick)
-
-                child_id = item.get("device_id") or item.get("deviceId") or item.get("id")
-                child_model = (
-                    item.get("model")
-                    or item.get("device_model")
-                    or item.get("sub_type")
-                    or "S200B"
-                )
-                child_mac = item.get("mac", "")
-                adapted_children.append(
-                    {
-                        "device_id": child_id,
-                        "hw_ver": item.get("hw_ver") or item.get("hardware_version") or "1.0",
-                        "fw_ver": item.get("fw_ver") or item.get("software_version") or item.get("sw_ver") or "1.0.0",
-                        "type": item.get("type") or item.get("device_type") or "SMART.TAPOBUTTON",
-                        "model": child_model,
-                        "mac": child_mac,
-                        "nickname": b64_nick,
-                        "status": "online" if item.get("status") in (1, "online", True) else "offline",
-                        "parent_device_id": parent_id,
-                        "rssi": item.get("rssi", 0),
-                        "signal_level": item.get("signal_level", 0),
-                        "at_low_battery": item.get("at_low_battery", False),
-                        "lastOnboardingTimestamp": item.get("lastOnboardingTimestamp", 0),
-                        "report_interval": item.get("report_interval", 16),
-                    }
-                )
-
-            _LOGGER.info("H200 adapted %d child devices", len(adapted_children))
-
+            await self._refresh_children_cache()
+            children = list(self._children_cache.values())
             return {
-                "child_device_list": adapted_children,
+                "child_device_list": children,
                 "start_index": start_index,
-                "sum": total_sum or len(adapted_children),
+                "sum": len(children),
             }
 
         # 4. Control child request
         if method == "control_child":
             device_id = getattr(params, "device_id", None)
+            if not device_id and isinstance(params, dict):
+                device_id = params.get("device_id")
+
             req_data = getattr(params, "requestData", None)
-            inner_dict = self._serialize_tapo_request(req_data)
+            if req_data is None and isinstance(params, dict):
+                req_data = params.get("requestData")
 
-            child_res = await self._execute_command(
-                "controlChild",
-                {
-                    "childControl": {
-                        "device_id": device_id,
-                        "request_data": inner_dict,
+            inner_method = None
+            if hasattr(req_data, "method"):
+                if req_data.method == "multipleRequest":
+                    inner_params = getattr(req_data, "params", None)
+                    requests_list = (
+                        getattr(inner_params, "requests", None) if inner_params else None
+                    )
+                    if requests_list and len(requests_list) > 0:
+                        inner_method = getattr(requests_list[0], "method", None)
+                else:
+                    inner_method = req_data.method
+            elif isinstance(req_data, dict):
+                if req_data.get("method") == "multipleRequest":
+                    reqs = req_data.get("params", {}).get("requests", [])
+                    if reqs:
+                        inner_method = reqs[0].get("method")
+                else:
+                    inner_method = req_data.get("method")
+
+            _LOGGER.debug(
+                "H200 control_child for device %s, inner_method: %s",
+                device_id,
+                inner_method,
+            )
+
+            # 4a. Child component negotiation
+            if inner_method in ("component_nego", "componentNego"):
+                return {
+                    "responseData": {
+                        "result": {
+                            "responses": [
+                                {
+                                    "component_list": [
+                                        {"id": "trigger_log", "ver_code": 1},
+                                        {"id": "battery_detect", "ver_code": 1},
+                                        {"id": "report_mode", "ver_code": 1},
+                                        {"id": "temp_humidity_records", "ver_code": 1},
+                                        {"id": "on_off", "ver_code": 1},
+                                    ]
+                                }
+                            ]
+                        }
                     }
-                },
-            )
+                }
 
-            child_output = (
-                child_res.get("responseData", {}).get("result", child_res.get("result", child_res))
-                if isinstance(child_res, dict)
-                else child_res
-            )
-            return {"responseData": {"result": {"responses": [child_output]}}}
+            # 4b. Child device info
+            if inner_method in ("get_device_info", "getDeviceInfo"):
+                if not self._children_cache or device_id not in self._children_cache:
+                    await self._refresh_children_cache()
+
+                cached_child = self._children_cache.get(device_id, {})
+                child_device_info = {
+                    "device_id": device_id,
+                    "hw_id": cached_child.get("hw_id", "1.0"),
+                    "oem_id": cached_child.get("oem_id", "1.0"),
+                    "fw_ver": cached_child.get("fw_ver", "1.0.0"),
+                    "hw_ver": cached_child.get("hw_ver", "1.0"),
+                    "mac": cached_child.get("mac", ""),
+                    "nickname": cached_child.get("nickname")
+                    or self._ensure_b64(cached_child.get("model", "Child")),
+                    "model": cached_child.get("model", "S200B"),
+                    "type": cached_child.get("type", "SMART.TAPOBUTTON"),
+                    "overheated": cached_child.get("overheated", False),
+                    "status": cached_child.get("status", "online"),
+                    "at_low_battery": cached_child.get("at_low_battery", False),
+                    "battery_percentage": cached_child.get("battery_percentage", -1),
+                    "report_interval": cached_child.get("report_interval", 16),
+                    "rssi": cached_child.get("rssi", 0),
+                    "signal_level": cached_child.get("signal_level", 0),
+                    "parent_device_id": cached_child.get("parent_device_id", ""),
+                }
+                return {"responseData": {"result": {"responses": [child_device_info]}}}
+
+            # 4c. Forward commands to H200
+            inner_dict = self._serialize_tapo_request(req_data)
+            try:
+                child_res = await self._execute_command(
+                    "controlChild",
+                    {
+                        "childControl": {
+                            "device_id": device_id,
+                            "request_data": inner_dict,
+                        }
+                    },
+                )
+                child_output = (
+                    child_res.get(
+                        "responseData",
+                        {},
+                    ).get("result", child_res.get("result", child_res))
+                    if isinstance(child_res, dict)
+                    else child_res
+                )
+                if isinstance(child_output, dict) and len(child_output) > 0:
+                    return {"responseData": {"result": {"responses": [child_output]}}}
+            except Exception as e:
+                _LOGGER.debug(
+                    "H200 controlChild %s for %s failed: %s",
+                    inner_method,
+                    device_id,
+                    e,
+                )
+
+            # Fallback for get_trigger_logs if empty or failed
+            if inner_method in ("get_trigger_logs", "getTriggerLogs"):
+                return {
+                    "responseData": {
+                        "result": {
+                            "responses": [
+                                {"start_id": 0, "sum": 0, "logs": []}
+                            ]
+                        }
+                    }
+                }
+
+            return {"responseData": {"result": {"responses": [{}]}}}
 
         # 5. Alarm controls
         if method == "play_alarm":
@@ -579,7 +696,7 @@ class CameraHubProtocol(TapoProtocol):
                 inner["params"] = self._serialize_tapo_request(req.params)
             return inner
         if hasattr(req, "requests"):
-            return [self._serialize_tapo_request(r) for r in req.requests]
+            return {"requests": [self._serialize_tapo_request(r) for r in req.requests]}
         if hasattr(req, "__dict__"):
             return {k: self._serialize_tapo_request(v) for k, v in req.__dict__.items()}
         return req
