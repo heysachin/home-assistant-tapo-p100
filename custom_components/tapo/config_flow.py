@@ -366,10 +366,13 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
 
 def is_supported_device(discovered_device: DiscoveredDevice) -> bool:
-    model = discovered_device.device_model.lower()
-    kind = discovered_device.device_type.upper()
-    if model.startswith("h200"):
+    model = (discovered_device.device_model or "").lower()
+    kind = (discovered_device.device_type or "").upper()
+    if "h200" in model:
         return True
+    if discovered_device.mgt_encrypt_schm and discovered_device.mgt_encrypt_schm.is_support_https:
+        if discovered_device.mgt_encrypt_schm.encrypt_type is None:
+            return True
     if kind == "SMART.IPCAMERA" or "CAMERA" in kind:
         _LOGGER.info("Found device model: %s, but type not supported %s", model, kind)
         return False

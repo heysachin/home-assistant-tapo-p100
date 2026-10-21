@@ -131,7 +131,7 @@ class CameraHubProtocol(TapoProtocol):
                 ) as resp:
                     resp_json = await resp.json(content_type=None)
                     if (
-                        resp_json.get("error_code") == 0
+                        resp_json.get("error_code") in (0, -40413)
                         and "result" in resp_json
                         and "data" in resp_json["result"]
                         and "nonce" in resp_json["result"]["data"]
@@ -143,6 +143,7 @@ class CameraHubProtocol(TapoProtocol):
                 _LOGGER.debug("Handshake attempt with %s failed: %s", candidate_user, e)
 
         if not handshake_data:
+            _LOGGER.error("H200 handshake probe failed for %s", self.host)
             raise InvalidAuthentication(self.host, "SMART.TAPOHUB")
 
         nonce = handshake_data["nonce"]
@@ -166,13 +167,27 @@ class CameraHubProtocol(TapoProtocol):
             .hexdigest()
             .upper()
         )
+        plain_candidate = (
+            hashlib.sha256(
+                cnonce.encode("utf8")
+                + self.password.encode("utf8")
+                + nonce.encode("utf8")
+            )
+            .hexdigest()
+            .upper()
+        )
 
         if device_confirm == (sha256_candidate + nonce + cnonce):
             hashed_pwd = self._hashed_sha256_password
         elif device_confirm == (md5_candidate + nonce + cnonce):
             hashed_pwd = self._hashed_md5_password
+        elif device_confirm == (plain_candidate + nonce + cnonce):
+            hashed_pwd = self.password
         else:
-            _LOGGER.error("Device confirm verification failed during H200 handshake")
+            _LOGGER.error(
+                "Device confirm verification failed during H200 handshake on %s",
+                self.host,
+            )
             raise InvalidAuthentication(self.host, "SMART.TAPOHUB")
 
         # Step 2: Login confirmation with digest_passwd
@@ -418,6 +433,9 @@ class CameraHubProtocol(TapoProtocol):
             elif "result" in child_res and "child_device_list" in child_res["result"]:
                 raw_children = child_res["result"]["child_device_list"]
                 total_sum = child_res["result"].get("sum", len(raw_children))
+            elif "result" in child_res and "childControl" in child_res["result"] and "child_device_list" in child_res["result"]["childControl"]:
+                raw_children = child_res["result"]["childControl"]["child_device_list"]
+                total_sum = child_res["result"]["childControl"].get("sum", len(raw_children))
 
             parent_id = (
                 self._hub_info_cache.get("device_id") if self._hub_info_cache else "H200_HUB"
@@ -425,17 +443,29 @@ class CameraHubProtocol(TapoProtocol):
 
             adapted_children = []
             for item in raw_children:
-                raw_nick = item.get("nickname") or item.get("alias") or item.get("model", "Child")
+                raw_nick = (
+                    item.get("alias")
+                    or item.get("nickname")
+                    or item.get("name")
+                    or item.get("model", "Child")
+                )
                 b64_nick = self._ensure_b64(raw_nick)
 
+                child_id = item.get("device_id") or item.get("deviceId") or item.get("id")
+                child_model = (
+                    item.get("model")
+                    or item.get("device_model")
+                    or item.get("sub_type")
+                    or "S200B"
+                )
                 child_mac = item.get("mac", "")
                 adapted_children.append(
                     {
-                        "device_id": item.get("device_id") or item.get("deviceId"),
-                        "hw_ver": item.get("hw_ver", "1.0"),
-                        "fw_ver": item.get("fw_ver", "1.0.0"),
-                        "type": item.get("type", "SMART.TAPOBUTTON"),
-                        "model": item.get("model", "S200B"),
+                        "device_id": child_id,
+                        "hw_ver": item.get("hw_ver") or item.get("hardware_version") or "1.0",
+                        "fw_ver": item.get("fw_ver") or item.get("software_version") or item.get("sw_ver") or "1.0.0",
+                        "type": item.get("type") or item.get("device_type") or "SMART.TAPOBUTTON",
+                        "model": child_model,
                         "mac": child_mac,
                         "nickname": b64_nick,
                         "status": "online" if item.get("status") in (1, "online", True) else "offline",
@@ -447,6 +477,8 @@ class CameraHubProtocol(TapoProtocol):
                         "report_interval": item.get("report_interval", 16),
                     }
                 )
+
+            _LOGGER.info("H200 adapted %d child devices", len(adapted_children))
 
             return {
                 "child_device_list": adapted_children,

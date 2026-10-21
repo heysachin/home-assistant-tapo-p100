@@ -73,7 +73,7 @@ class MockH200HttpHandler:
 
                 mock_resp.json = AsyncMock(
                     return_value={
-                        "error_code": 0,
+                        "error_code": -40413,
                         "result": {
                             "data": {
                                 "nonce": nonce,
