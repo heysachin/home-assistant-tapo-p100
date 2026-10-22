@@ -546,24 +546,12 @@ class CameraHubProtocol(TapoProtocol):
             if req_data is None and isinstance(params, dict):
                 req_data = params.get("requestData")
 
-            inner_method = None
-            if hasattr(req_data, "method"):
-                if req_data.method == "multipleRequest":
-                    inner_params = getattr(req_data, "params", None)
-                    requests_list = (
-                        getattr(inner_params, "requests", None) if inner_params else None
-                    )
-                    if requests_list and len(requests_list) > 0:
-                        inner_method = getattr(requests_list[0], "method", None)
-                else:
-                    inner_method = req_data.method
-            elif isinstance(req_data, dict):
-                if req_data.get("method") == "multipleRequest":
-                    reqs = req_data.get("params", {}).get("requests", [])
-                    if reqs:
-                        inner_method = reqs[0].get("method")
-                else:
-                    inner_method = req_data.get("method")
+            child_req = self._extract_child_request(req_data)
+            inner_method = (
+                getattr(child_req, "method", None)
+                if hasattr(child_req, "method")
+                else (child_req.get("method") if isinstance(child_req, dict) else None)
+            )
 
             _LOGGER.debug(
                 "H200 control_child for device %s, inner_method: %s",
@@ -619,28 +607,26 @@ class CameraHubProtocol(TapoProtocol):
                 }
                 return {"responseData": {"result": {"responses": [child_device_info]}}}
 
-            # 4c. Forward commands to H200
-            inner_dict = self._serialize_tapo_request(req_data)
+            # 4c. Forward commands to H200 (unwrapping child_req so H200 doesn't receive nested multipleRequest)
+            child_payload = self._serialize_tapo_request(child_req)
+            child_output = None
+
             try:
                 child_res = await self._execute_command(
                     "controlChild",
                     {
                         "childControl": {
                             "device_id": device_id,
-                            "request_data": inner_dict,
+                            "request_data": child_payload,
                         }
                     },
                 )
-                child_output = (
-                    child_res.get(
-                        "responseData",
-                        {},
-                    ).get("result", child_res.get("result", child_res))
-                    if isinstance(child_res, dict)
-                    else child_res
-                )
-                if isinstance(child_output, dict) and len(child_output) > 0:
-                    return {"responseData": {"result": {"responses": [child_output]}}}
+                unwrapped = self._unwrap_child_response(child_res)
+                if unwrapped and (
+                    "logs" in unwrapped
+                    or (isinstance(unwrapped, dict) and len(unwrapped) > 0 and "error_code" not in unwrapped)
+                ):
+                    child_output = unwrapped
             except Exception as e:
                 _LOGGER.debug(
                     "H200 controlChild %s for %s failed: %s",
@@ -648,6 +634,73 @@ class CameraHubProtocol(TapoProtocol):
                     device_id,
                     e,
                 )
+
+            # If get_trigger_logs returned no logs, try alternative formats
+            if (
+                child_output is None or "logs" not in child_output
+            ) and inner_method in ("get_trigger_logs", "getTriggerLogs"):
+                page_size = 5
+                start_id = 0
+                if hasattr(child_req, "params") and child_req.params is not None:
+                    page_size = getattr(child_req.params, "page_size", 5)
+                    start_id = getattr(child_req.params, "start_id", 0)
+                elif isinstance(child_req, dict) and "params" in child_req:
+                    page_size = child_req["params"].get("page_size", 5)
+                    start_id = child_req["params"].get("start_id", 0)
+
+                # Alternative 1: camelCase getTriggerLogs with pageSize/startId
+                try:
+                    alt_payload = {
+                        "method": "getTriggerLogs",
+                        "params": {
+                            "pageSize": page_size,
+                            "startId": start_id,
+                            "page_size": page_size,
+                            "start_id": start_id,
+                        },
+                    }
+                    child_res = await self._execute_command(
+                        "controlChild",
+                        {
+                            "childControl": {
+                                "device_id": device_id,
+                                "request_data": alt_payload,
+                            }
+                        },
+                    )
+                    unwrapped = self._unwrap_child_response(child_res)
+                    if unwrapped and "logs" in unwrapped:
+                        child_output = unwrapped
+                except Exception as e:
+                    _LOGGER.debug("Alternative getTriggerLogs failed: %s", e)
+
+                # Alternative 2: getChildEventList on hub with childControl
+                if child_output is None or "logs" not in child_output:
+                    try:
+                        child_res = await self._execute_command(
+                            "getChildEventList",
+                            {
+                                "childControl": {
+                                    "device_id": device_id,
+                                    "start_index": start_id,
+                                }
+                            },
+                        )
+                        unwrapped = self._unwrap_child_response(child_res)
+                        if unwrapped and "logs" in unwrapped:
+                            child_output = unwrapped
+                    except Exception as e:
+                        _LOGGER.debug("Alternative getChildEventList failed: %s", e)
+
+            if child_output is not None:
+                if "logs" in child_output and len(child_output["logs"]) > 0:
+                    _LOGGER.info(
+                        "H200 child %s received %d trigger events: %s",
+                        device_id,
+                        len(child_output["logs"]),
+                        child_output["logs"],
+                    )
+                return {"responseData": {"result": {"responses": [child_output]}}}
 
             # Fallback for get_trigger_logs if empty or failed
             if inner_method in ("get_trigger_logs", "getTriggerLogs"):
@@ -700,6 +753,99 @@ class CameraHubProtocol(TapoProtocol):
         if hasattr(req, "__dict__"):
             return {k: self._serialize_tapo_request(v) for k, v in req.__dict__.items()}
         return req
+
+    def _extract_child_request(self, req_data: Any) -> Any:
+        """Unwrap multipleRequest wrapper if present to get the actual sub-device command."""
+        if hasattr(req_data, "method"):
+            if req_data.method == "multipleRequest":
+                inner_params = getattr(req_data, "params", None)
+                requests_list = (
+                    getattr(inner_params, "requests", None) if inner_params else None
+                )
+                if requests_list and len(requests_list) > 0:
+                    return requests_list[0]
+            return req_data
+        if isinstance(req_data, dict):
+            if req_data.get("method") == "multipleRequest":
+                reqs = req_data.get("params", {}).get("requests", [])
+                if reqs and len(reqs) > 0:
+                    return reqs[0]
+            return req_data
+        return req_data
+
+    def _unwrap_child_response(self, resp: Any) -> dict[str, Any]:
+        """Unwrap H200 childControl / response_data / responseData / result wrappers."""
+        if not isinstance(resp, dict):
+            return {}
+        curr = resp
+        for _ in range(5):
+            if not isinstance(curr, dict):
+                break
+            if "childControl" in curr and isinstance(curr["childControl"], dict):
+                curr = curr["childControl"]
+            elif "response_data" in curr and isinstance(curr["response_data"], dict):
+                curr = curr["response_data"]
+            elif "responseData" in curr and isinstance(curr["responseData"], dict):
+                curr = curr["responseData"]
+            elif "result" in curr and isinstance(curr["result"], dict):
+                curr = curr["result"]
+            else:
+                break
+
+        if isinstance(curr, dict) and "logs" in curr:
+            logs = curr.get("logs") or []
+            normalized_logs = [self._normalize_log_item(item) for item in logs]
+            start_id = (
+                curr.get("start_id")
+                if curr.get("start_id") is not None
+                else curr.get("startId", curr.get("start_index", 0))
+            )
+            sum_count = (
+                curr.get("sum") if curr.get("sum") is not None else len(normalized_logs)
+            )
+            return {
+                "start_id": int(start_id or 0),
+                "sum": int(sum_count or 0),
+                "logs": normalized_logs,
+            }
+
+        return curr if isinstance(curr, dict) else {}
+
+    @staticmethod
+    def _normalize_log_item(item: Any) -> dict[str, Any]:
+        """Normalize log item so parse_s200b_event can parse it regardless of key casing."""
+        if not isinstance(item, dict):
+            return {}
+        norm = dict(item)
+        # Event type
+        ev = norm.get("event") or norm.get("event_type") or norm.get("type") or ""
+        if ev in ("single_click", "singleClick", "SingleClick", "click"):
+            norm["event"] = "singleClick"
+        elif ev in ("double_click", "doubleClick", "DoubleClick"):
+            norm["event"] = "doubleClick"
+        elif ev in ("rotation", "rotate", "Rotation"):
+            norm["event"] = "rotation"
+            if "params" not in norm or not isinstance(norm["params"], dict):
+                norm["params"] = {
+                    "rotate_deg": norm.get("rotate_deg", norm.get("degrees", 0))
+                }
+
+        # ID
+        if "id" not in norm:
+            if "eventId" in norm:
+                norm["id"] = norm["eventId"]
+            elif "event_id" in norm:
+                norm["id"] = norm["event_id"]
+            elif "timestamp" in norm:
+                norm["id"] = norm["timestamp"]
+            else:
+                norm["id"] = 0
+
+        # Timestamp
+        if "timestamp" not in norm:
+            norm["timestamp"] = norm.get("time", int(time.time()))
+
+        return norm
 
     @staticmethod
     def _ensure_b64(val: str) -> str:

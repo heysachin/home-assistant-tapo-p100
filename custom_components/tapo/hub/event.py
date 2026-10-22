@@ -171,9 +171,13 @@ class HubEventLogPoller:
             )
             result = EventLogPollResult(logs=logs, latency_ms=latency_ms)
             self._apply_latency_sample(latency_ms)
-        except Exception:
+        except Exception as err:
             self._adaptive_state.latency_ms = None
-            _LOGGER.debug("Failed to fetch event logs for %s", self._device.device_id)
+            _LOGGER.warning(
+                "Failed to fetch event logs for %s: %s",
+                self._device.device_id,
+                err,
+            )
 
         self._last_result = result
         for listener in tuple(self._listeners):
@@ -381,9 +385,11 @@ class TapoButtonEvent(_TapoEventBase):
 
     def _handle_event(self, event: S200BEvent) -> None:
         if isinstance(event, SingleClickEvent):
+            _LOGGER.info("Tapo Button %s: single_click event fired", self.entity_id)
             self._trigger_event(EVENT_SINGLE_CLICK)
             self.async_write_ha_state()
         elif isinstance(event, DoubleClickEvent):
+            _LOGGER.info("Tapo Button %s: double_click event fired", self.entity_id)
             self._trigger_event(EVENT_DOUBLE_CLICK)
             self.async_write_ha_state()
 
@@ -400,5 +406,10 @@ class TapoDialEvent(_TapoEventBase):
 
     def _handle_event(self, event: S200BEvent) -> None:
         if isinstance(event, RotationEvent):
+            _LOGGER.info(
+                "Tapo Dial %s: rotation event fired (%d deg)",
+                self.entity_id,
+                event.degrees,
+            )
             self._trigger_event(EVENT_ROTATION, {"degrees": event.degrees})
             self.async_write_ha_state()

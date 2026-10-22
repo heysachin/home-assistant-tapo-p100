@@ -549,3 +549,40 @@ async def test_camera_hub_protocol_control_child_device_info_and_button_update()
     assert button.nickname == "My Smart Button"
     assert button.battery_low is False
     assert len(button.get_device_components) >= 2
+
+    # 5. Test button get_event_logs with normalized logs
+    logs_res = (await button.get_event_logs(5, 0)).get_or_raise()
+    assert logs_res.size >= 1
+    assert len(logs_res.events) >= 1
+    first_event = logs_res.events[0]
+    assert first_event.id == 1
+
+
+def test_unwrap_and_normalize_child_response():
+    cred = AuthCredential("admin", "password123")
+    protocol = CameraHubProtocol(cred, "1.2.3.4", 443)
+
+    # Test nested childControl with response_data
+    h200_resp = {
+        "childControl": {
+            "device_id": "CHILD_BUTTON_1",
+            "response_data": {
+                "result": {
+                    "startId": 5,
+                    "sum": 2,
+                    "logs": [
+                        {"event_type": "single_click", "eventId": 10, "time": 1700000000},
+                        {"type": "rotation", "event_id": 11, "time": 1700000005, "rotate_deg": -15},
+                    ],
+                }
+            },
+        }
+    }
+    unwrapped = protocol._unwrap_child_response(h200_resp)
+    assert unwrapped["start_id"] == 5
+    assert unwrapped["sum"] == 2
+    assert len(unwrapped["logs"]) == 2
+    assert unwrapped["logs"][0]["event"] == "singleClick"
+    assert unwrapped["logs"][0]["id"] == 10
+    assert unwrapped["logs"][1]["event"] == "rotation"
+    assert unwrapped["logs"][1]["params"]["rotate_deg"] == -15
