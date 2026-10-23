@@ -69,6 +69,10 @@ async def fetch_event_logs(coordinator, device, page_size=5, hass=None, entry_id
     does the actual HTTP request; subsequent callers get the cached result.
     A per-hub lock serializes requests across child devices.
     """
+    if getattr(coordinator, "_is_camera_hub", False):
+        empty_logs = type("EmptyLogs", (), {"events": []})()
+        return empty_logs, 0.0
+
     cache = getattr(coordinator, "_event_log_cache", None)
     now = time.monotonic()
 
@@ -156,6 +160,8 @@ class HubEventLogPoller:
 
     @callback
     def schedule_refresh(self) -> None:
+        if getattr(self._coordinator, "_is_camera_hub", False):
+            return
         if self._task and not self._task.done():
             return
         self._task = self._hass.async_create_task(self._async_refresh())
@@ -191,6 +197,9 @@ class HubEventLogPoller:
         return self.DEFAULT_U_MAX
 
     def _apply_latency_sample(self, latency_ms: float) -> None:
+        if getattr(self._coordinator, "_is_camera_hub", False):
+            return
+
         state = self._adaptive_state
         state.latency_ms = round(latency_ms, 1)
 
@@ -309,6 +318,9 @@ class _TapoEventBase(CoordinatedTapoEntity, EventEntity):
     @callback
     def _handle_coordinator_update(self) -> None:
         if not self._ha_started:
+            return
+        if getattr(self.coordinator, "_is_camera_hub", False):
+            self.async_write_ha_state()
             return
         if self._event_log_poller is None:
             self._event_log_poller = get_hub_event_log_poller(

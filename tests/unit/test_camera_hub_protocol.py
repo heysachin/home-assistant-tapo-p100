@@ -30,7 +30,7 @@ from plugp100.errors.invalid_authentication import InvalidAuthentication
 
 
 class MockH200HttpHandler:
-    def __init__(self, username="admin", password="password123"):
+    def __init__(self, username="admin", password="password123", empty_child_logs=False):
         self.username = username
         self.password = password
         self.hashed_sha256 = hashlib.sha256(password.encode("utf-8")).hexdigest().upper()
@@ -39,6 +39,7 @@ class MockH200HttpHandler:
         self.lsk = None
         self.ivb = None
         self.stok_expired_once = False
+        self.empty_child_logs = empty_child_logs
         self.requests_log = []
 
     def handle_post(self, url: str, **kwargs):
@@ -193,12 +194,13 @@ class MockH200HttpHandler:
                         "error_code": 0,
                     }
                 elif m == "controlChild":
+                    logs = [] if self.empty_child_logs else [{"id": 1, "event": "single_click"}]
                     return {
                         "method": "controlChild",
                         "result": {
                             "responseData": {
                                 "result": {
-                                    "logs": [{"id": 1, "event": "single_click"}]
+                                    "logs": logs
                                 }
                             }
                         },
@@ -586,3 +588,39 @@ def test_unwrap_and_normalize_child_response():
     assert unwrapped["logs"][0]["id"] == 10
     assert unwrapped["logs"][1]["event"] == "rotation"
     assert unwrapped["logs"][1]["params"]["rotate_deg"] == -15
+
+
+@pytest.mark.asyncio
+async def test_camera_hub_protocol_isolated_session_lifecycle():
+    cred = AuthCredential("admin", "password123")
+    protocol = CameraHubProtocol(cred, "1.2.3.4", 443, http_session=None)
+    session = await protocol._ensure_session()
+    assert session is not None
+    assert protocol._own_session is True
+    assert protocol.http_session is session
+    # Close protocol
+    await protocol.close()
+    assert session.closed is True
+    assert protocol.http_session is None
+
+
+@pytest.mark.asyncio
+async def test_camera_hub_protocol_get_trigger_logs_empty_fallback():
+    handler = MockH200HttpHandler(username="admin", password="password123", empty_child_logs=True)
+    mock_session = MockAiohttpSession(handler)
+    cred = AuthCredential("admin", "password123")
+    protocol = CameraHubProtocol(cred, "1.2.3.4", 443, http_session=mock_session)
+    await protocol.authenticate()
+
+    req = TapoRequest("control_child", {
+        "device_id": "CHILD_BUTTON_1",
+        "requestData": {"method": "get_trigger_logs", "params": {"page_size": 5, "start_id": 0}},
+    })
+    res = (await protocol.send_request(req)).get_or_else(None)
+    assert res is not None
+    assert res.error_code == 0
+    responses = res.result["responseData"]["result"]["responses"]
+    assert len(responses) == 1
+    assert responses[0]["sum"] == 0
+    assert responses[0]["logs"] == []
+

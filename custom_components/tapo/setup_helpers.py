@@ -145,16 +145,20 @@ async def _create_h200_hub(
     host: str,
     port: int,
     credentials: Optional[AuthCredential],
-    session: ClientSession,
+    session: Optional[ClientSession] = None,
 ) -> TapoHub:
     if credentials is None:
         raise InvalidAuthentication(host, "SMART.TAPOHUB")
+    # Always create an isolated dedicated session for CameraHubProtocol to prevent
+    # exhausting Home Assistant's global session pool or affecting other integrations.
     protocol = CameraHubProtocol(
         auth_credential=credentials,
         host=host,
         port=port,
-        http_session=session,
+        http_session=None,
     )
     await protocol.authenticate()
-    client = TapoClient(credentials, f"https://{host}:{port}/app", protocol, session)
+    client = TapoClient(
+        credentials, f"https://{host}:{port}/app", protocol, protocol.http_session
+    )
     return TapoHub(host, port, client)

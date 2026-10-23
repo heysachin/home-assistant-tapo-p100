@@ -82,6 +82,10 @@ class CameraHubProtocol(TapoProtocol):
     def name(self) -> str:
         return "CameraHub"
 
+    @property
+    def http_session(self) -> Optional[aiohttp.ClientSession]:
+        return self._http_session
+
     async def authenticate(self) -> bool:
         async with self._lock:
             await self._login()
@@ -89,7 +93,16 @@ class CameraHubProtocol(TapoProtocol):
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._http_session is None or self._http_session.closed:
-            self._http_session = aiohttp.ClientSession()
+            connector = aiohttp.TCPConnector(
+                limit=2,
+                limit_per_host=1,
+                keepalive_timeout=30,
+                ssl=False,
+            )
+            self._http_session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=5, connect=2),
+            )
             self._own_session = True
         return self._http_session
 
@@ -98,6 +111,7 @@ class CameraHubProtocol(TapoProtocol):
             self._session = None
             if self._own_session and self._http_session and not self._http_session.closed:
                 await self._http_session.close()
+                self._http_session = None
 
     async def _login(self) -> CameraHubSession:
         session = await self._ensure_session()
@@ -635,63 +649,6 @@ class CameraHubProtocol(TapoProtocol):
                     e,
                 )
 
-            # If get_trigger_logs returned no logs, try alternative formats
-            if (
-                child_output is None or "logs" not in child_output
-            ) and inner_method in ("get_trigger_logs", "getTriggerLogs"):
-                page_size = 5
-                start_id = 0
-                if hasattr(child_req, "params") and child_req.params is not None:
-                    page_size = getattr(child_req.params, "page_size", 5)
-                    start_id = getattr(child_req.params, "start_id", 0)
-                elif isinstance(child_req, dict) and "params" in child_req:
-                    page_size = child_req["params"].get("page_size", 5)
-                    start_id = child_req["params"].get("start_id", 0)
-
-                # Alternative 1: camelCase getTriggerLogs with pageSize/startId
-                try:
-                    alt_payload = {
-                        "method": "getTriggerLogs",
-                        "params": {
-                            "pageSize": page_size,
-                            "startId": start_id,
-                            "page_size": page_size,
-                            "start_id": start_id,
-                        },
-                    }
-                    child_res = await self._execute_command(
-                        "controlChild",
-                        {
-                            "childControl": {
-                                "device_id": device_id,
-                                "request_data": alt_payload,
-                            }
-                        },
-                    )
-                    unwrapped = self._unwrap_child_response(child_res)
-                    if unwrapped and "logs" in unwrapped:
-                        child_output = unwrapped
-                except Exception as e:
-                    _LOGGER.debug("Alternative getTriggerLogs failed: %s", e)
-
-                # Alternative 2: getChildEventList on hub with childControl
-                if child_output is None or "logs" not in child_output:
-                    try:
-                        child_res = await self._execute_command(
-                            "getChildEventList",
-                            {
-                                "childControl": {
-                                    "device_id": device_id,
-                                    "start_index": start_id,
-                                }
-                            },
-                        )
-                        unwrapped = self._unwrap_child_response(child_res)
-                        if unwrapped and "logs" in unwrapped:
-                            child_output = unwrapped
-                    except Exception as e:
-                        _LOGGER.debug("Alternative getChildEventList failed: %s", e)
-
             if child_output is not None:
                 if "logs" in child_output and len(child_output["logs"]) > 0:
                     _LOGGER.info(
@@ -702,7 +659,7 @@ class CameraHubProtocol(TapoProtocol):
                     )
                 return {"responseData": {"result": {"responses": [child_output]}}}
 
-            # Fallback for get_trigger_logs if empty or failed
+            # Fallback for get_trigger_logs if empty or failed (H200 local firmware does not store trigger logs)
             if inner_method in ("get_trigger_logs", "getTriggerLogs"):
                 return {
                     "responseData": {

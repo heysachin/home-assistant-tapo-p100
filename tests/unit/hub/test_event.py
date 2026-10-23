@@ -114,6 +114,13 @@ class TestFetchEventLogs:
         assert "latency_ms" in cache
         assert cache["latency_ms"] >= 0
 
+    async def test_camera_hub_bypasses_fetch(self):
+        self.coordinator._is_camera_hub = True
+        logs, latency = await fetch_event_logs(self.coordinator, self.device)
+        self.device.get_event_logs.assert_not_called()
+        assert len(logs.events) == 0
+        assert latency == 0.0
+
 
 class TestDoFetch:
     @pytest.fixture(autouse=True)
@@ -227,6 +234,16 @@ class TestHubEventLogPoller:
             self.poller.adaptive_state.computed_interval_ms
             <= HubEventLogPoller.MAX_INTERVAL_MS
         )
+
+    async def test_schedule_refresh_bypassed_for_camera_hub(self):
+        self.coordinator._is_camera_hub = True
+        self.poller.schedule_refresh()
+        assert self.hass.async_create_task.call_count == 0
+
+    def test_apply_latency_sample_bypassed_for_camera_hub(self):
+        self.coordinator._is_camera_hub = True
+        self.poller._apply_latency_sample(100.0)
+        assert self.poller.adaptive_state.latency_ms is None
 
 
 class TestTapoButtonEvent:

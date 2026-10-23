@@ -94,12 +94,14 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry):
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Unload a config entry."""
-    data = cast(HassTapoDeviceData, hass.data[DOMAIN][entry.entry_id])
+    data = cast(HassTapoDeviceData, hass.data[DOMAIN].get(entry.entry_id))
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        hass.data[DOMAIN].pop(entry.entry_id)
+        hass.data[DOMAIN].pop(entry.entry_id, None)
 
     if data and unload_ok:
         data.config_entry_update_unsub()
+        if hasattr(data.device, "client") and hasattr(data.device.client, "close"):
+            await data.device.client.close()
     return unload_ok
 
 

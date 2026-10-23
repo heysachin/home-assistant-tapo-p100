@@ -88,7 +88,14 @@ class HassTapoHub:
         devices: List[TapoDevice],
         polling_rate: timedelta,
     ) -> List[TapoDataCoordinator]:
-        button_polling_rate = timedelta(milliseconds=DEFAULT_BUTTON_POLLING_RATE_MS)
+        is_camera_hub = "H200" in (self.hub.model or "").upper() or hasattr(
+            self.hub.client.protocol, "_session"
+        )
+        button_polling_rate = (
+            polling_rate
+            if is_camera_hub
+            else timedelta(milliseconds=DEFAULT_BUTTON_POLLING_RATE_MS)
+        )
         coordinators = [
             TapoDataCoordinator(
                 hass,
@@ -102,6 +109,7 @@ class HassTapoHub:
 
         for coordinator in coordinators:
             coordinator._hub_entry_id = self.entry.entry_id
+            coordinator._is_camera_hub = is_camera_hub
             await coordinator.async_config_entry_first_refresh()
 
         device_entries = [
